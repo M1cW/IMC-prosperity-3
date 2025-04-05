@@ -171,46 +171,46 @@ class TradingStrategy(Strategy):
 		min_sell_price = fair_value + 1 if position < self.pos_limit * -0.5 else fair_value
 
 		for price, volume in sell_orders:
-            		if buy > 0 and price <= max_buy_price:
+			if buy > 0 and price <= max_buy_price:
 				quantity = min(buy, -volume)
 				self.buy(price, quantity)
 				buy -= quantity
 
-		        if buy > 0 and hard_liquidate:
-			        quantity = buy // 2
-			        self.buy(fair_value, quantity)
-			        buy -= quantity
-		
-		        if buy > 0 and soft_liquidate:
-			        quantity = buy // 2
-			        self.buy(fair_value - 2, quantity)
-			        buy -= quantity
-		
-		        if buy > 0:
-			        common_buy_price = max(buy_orders, key = lambda x: x[1])[0]
-			        price = min(max_buy_price, common_buy_price + 1)
-			        self.buy(price, buy)
+			if buy > 0 and hard_liquidate:
+				quantity = buy // 2
+				self.buy(fair_value, quantity)
+				buy -= quantity
 
-	        for price, volume in buy_orders:
-	        	if sell > 0 and price >= min_sell_price:
-		                quantity = min(sell, volume)
-		                self.sell(price, quantity)
-		                sell -= quantity
-	
-		        if sell > 0 and hard_liquidate:
-			        quantity = sell // 2
-			        self.sell(fair_value, quantity)
-			        sell -= quantity
-			
-		        if sell > 0 and soft_liquidate:
-			        quantity = sell // 2
-			        self.sell(fair_value + 2, quantity)
-			        sell -= quantity
-		
-		        if sell > 0:
-			        common_sell_price = min(sell_orders, key = lambda x: x[1])[0]
-			        price = max(min_sell_price, common_sell_price - 1)
-			        self.sell(price, sell)
+			if buy > 0 and soft_liquidate:
+				quantity = buy // 2
+				self.buy(fair_value - 2, quantity)
+				buy -= quantity
+
+			if buy > 0:
+				common_buy_price = max(buy_orders, key=lambda x: x[1])[0]
+				price = min(max_buy_price, common_buy_price + 1)
+				self.buy(price, buy)
+
+		for price, volume in buy_orders:
+			if sell > 0 and price >= min_sell_price:
+				quantity = min(sell, volume)
+				self.sell(price, quantity)
+				sell -= quantity
+
+			if sell > 0 and hard_liquidate:
+				quantity = sell // 2
+				self.sell(fair_value, quantity)
+				sell -= quantity
+
+			if sell > 0 and soft_liquidate:
+				quantity = sell // 2
+				self.sell(fair_value + 2, quantity)
+				sell -= quantity
+
+			if sell > 0:
+				common_sell_price = min(sell_orders, key=lambda x: x[1])[0]
+				price = max(min_sell_price, common_sell_price - 1)
+				self.sell(price, sell)
 		# Finish implementing
 	def save(self) -> JSON:
 		return list(self.deque)
@@ -236,25 +236,26 @@ class Trader:
 		    "RAINFOREST_RESIN": 50,
 		    "KELP": 50,
 	    }
-	    self.strategies = {symbol: symbol_strat(symbol, limits[symbol]) for symbol, symbol_strat in {
-		    "RAINFOREST_RESIN": RainforestResinStrategy,
-		    "KELP": KelpStrategy,
-	    }.items()}
+		self.strategies = {symbol: symbol_strat(symbol, limits[symbol]) for symbol, symbol_strat in {
+			"RAINFOREST_RESIN": RainforestResinStrategy,
+			"KELP": KelpStrategy,
+		}.items()}
 	    
-    def run(self, state: TradingState):
-	    conversions = 0
-	    old_data = json.loads(state.traderData) if state.traderData != "" else {}
-	    new_data = {}
-	    orders = {}
-	    for symbol, strategy in self.strategies.items():
-		    if symbol in old_data:
-			    strategy.load(old_data.get(symbol, None))
-		    if symbol in state.order_depths:
-			    orders[symbol] = strategy.run(state)
-		    new_data[symbol] = strategy.save()
-	    trader_data = json.dumps(new_data, separators = (",", ":"))
-	    logger.flush(state, orders, conversions, trader_data)
-	    return orders, conversions, trader_data)
+	    
+	def run(self, state: TradingState):
+		conversions = 0
+		old_data = json.loads(state.traderData) if state.traderData != "" else {}
+		new_data = {}
+		orders = {}
+		for symbol, strategy in self.strategies.items():
+			if symbol in old_data:
+				strategy.load(old_data.get(symbol, None))
+			if symbol in state.order_depths:
+				orders[symbol] = strategy.run(state)
+			new_data[symbol] = strategy.save()
+		trader_data = json.dumps(new_data, separators=(",", ":"))
+		logger.flush(state, orders, conversions, trader_data)
+		return orders, conversions, trader_data
     #     print("traderData: " + state.traderData)
     #     print("Observations: " + str(state.observations))
 
