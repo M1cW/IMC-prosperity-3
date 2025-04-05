@@ -254,7 +254,7 @@ class Trader:
 		    new_data[symbol] = strategy.save()
 	    trader_data = json.dumps(new_data, separators = (",", ":"))
 	    logger.flush(state, orders, conversions, trader_data)
-	    return orders, conversions, trader_data)
+	    return orders, conversions, trader_data
     #     print("traderData: " + state.traderData)
     #     print("Observations: " + str(state.observations))
 
