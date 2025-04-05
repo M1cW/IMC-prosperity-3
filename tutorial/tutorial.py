@@ -236,25 +236,25 @@ class Trader:
 		    "RAINFOREST_RESIN": 50,
 		    "KELP": 50,
 	    }
-	    self.strategies = {symbol: symbol_strat(symbol, limits[symbol]) for symbol, symbol_strat in {
-		    "RAINFOREST_RESIN": RainforestResinStrategy,
-		    "KELP": KelpStrategy,
-	    }.items()}
+		self.strategies = {symbol: symbol_strat(symbol, limits[symbol]) for symbol, symbol_strat in {
+			"RAINFOREST_RESIN": RainforestResinStrategy,
+			"KELP": KelpStrategy,
+		}.items()}
 	    
-    def run(self, state: TradingState):
-	    conversions = 0
-	    old_data = json.loads(state.traderData) if state.traderData != "" else {}
-	    new_data = {}
-	    orders = {}
-	    for symbol, strategy in self.strategies.items():
-		    if symbol in old_data:
-			    strategy.load(old_data.get(symbol, None))
-		    if symbol in state.order_depths:
-			    orders[symbol] = strategy.run(state)
-		    new_data[symbol] = strategy.save()
-	    trader_data = json.dumps(new_data, separators = (",", ":"))
-	    logger.flush(state, orders, conversions, trader_data)
-	    return orders, conversions, trader_data)
+	def run(self, state: TradingState):
+		conversions = 0
+		old_data = json.loads(state.traderData) if state.traderData != "" else {}
+		new_data = {}
+		orders = {}
+		for symbol, strategy in self.strategies.items():
+			if symbol in old_data:
+				strategy.load(old_data.get(symbol, None))
+			if symbol in state.order_depths:
+				orders[symbol] = strategy.run(state)
+			new_data[symbol] = strategy.save()
+		trader_data = json.dumps(new_data, separators=(",", ":"))
+		logger.flush(state, orders, conversions, trader_data)
+		return orders, conversions, trader_data
     #     print("traderData: " + state.traderData)
     #     print("Observations: " + str(state.observations))
 
