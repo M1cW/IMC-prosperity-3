@@ -232,16 +232,13 @@ class KelpStrategy(TradingStrategy):
 
 class Trader:
     def __init__(self) -> None:
-	    limits = {
-		    "RAINFOREST_RESIN": 50,
-		    "KELP": 50,
-	    }
-		self.strategies = {symbol: symbol_strat(symbol, limits[symbol]) for symbol, symbol_strat in {
-			"RAINFOREST_RESIN": RainforestResinStrategy,
-			"KELP": KelpStrategy,
-		}.items()}
-	    
-	    
+		limits = {
+			"RAINFOREST_RESIN": 50,
+			"KELP": 50,
+		}
+		self.strategies = {}
+		self.strategies = {symbol: symbol_strat(symbol, limits[symbol]) for symbol, symbol_strat in {"RAINFOREST_RESIN": RainforestResinStrategy, "KELP": KelpStrategy}.items()}
+	
 	def run(self, state: TradingState):
 		conversions = 0
 		old_data = json.loads(state.traderData) if state.traderData != "" else {}
