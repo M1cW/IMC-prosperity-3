@@ -14,12 +14,31 @@ class Trader:
         self.kelp_prices = []
         self.kelp_vwap = []
         self.kelp_mmmid = []
-
+        self.ink_prices = []  # Added for SQUID_INK price tracking
+        
         self.LIMIT = {
             Product.RAINFOREST_RESIN: 50,
             Product.KELP: 50,
             Product.SQUID_INK: 50
         }
+        
+        # Initialize position tracking
+        self.positions = {
+            Product.RAINFOREST_RESIN: 0,
+            Product.KELP: 0,
+            Product.SQUID_INK: 0
+        }
+
+    def calc_mid(self, order_depth: OrderDepth) -> float:
+        """Calculate mid price from order depth"""
+        if not order_depth.buy_orders or not order_depth.sell_orders:
+            return 0.0
+        best_bid = max(order_depth.buy_orders.keys())
+        best_ask = min(order_depth.sell_orders.keys())
+        return (best_bid + best_ask) / 2
+
+    def get_position(self, product: str, state: TradingState) -> int:
+        return state.position.get(product, 0)
 
     # Returns buy_order_volume, sell_order_volume
     def take_best_orders(self, product: str, fair_value: int, take_width:float, orders: List[Order], order_depth: OrderDepth, position: int, buy_order_volume: int, sell_order_volume: int, prevent_adverse: bool = False, adverse_volume: int = 0) -> (int, int):
@@ -191,114 +210,147 @@ class Trader:
     
     def squid_ink_orders(self, order_depth: OrderDepth, fair_value: int, width: float, position: int, position_limit: int, state: TradingState) -> List[Order]:
         orders: List[Order] = []
-        product = "SQUID_INK"
-        depth = state.order_depths[product]
+        product = Product.SQUID_INK
         current_pos = self.get_position(product, state)
         
         # Calculate fair value with KELP correlation
-        kelp_mid = self.calc_mid(state.order_depths["KELP"])
+        kelp_mid = 0
+        if Product.KELP in state.order_depths:
+            kelp_depth = state.order_depths[Product.KELP]
+            if kelp_depth.buy_orders and kelp_depth.sell_orders:
+                kelp_best_bid = max(kelp_depth.buy_orders.keys())
+                kelp_best_ask = min(kelp_depth.sell_orders.keys())
+                kelp_mid = (kelp_best_bid + kelp_best_ask) / 2
+        
         hour = (state.timestamp // 10000) % 24
         time_factor = 1.003 if 14 <= hour < 18 else 0.997  # Late afternoon boost
         
-        ink_bid = max(depth.buy_orders.keys()) if depth.buy_orders else 0
-        ink_ask = min(depth.sell_orders.keys()) if depth.sell_orders else 0
+        ink_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
+        ink_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else 0
         base_mid = (ink_bid + ink_ask) / 2 if ink_bid and ink_ask else self.ink_prices[-1] if self.ink_prices else 1965
         
         # Incorporate KELP momentum (0.82 correlation)
-        kelp_ma5 = np.mean(self.kelp_prices[-5:]) if len(self.kelp_prices) >=5 else kelp_mid
-        kelp_change = kelp_mid - kelp_ma5
+        kelp_ma5 = np.mean(self.kelp_prices[-5:]) if len(self.kelp_prices) >= 5 else kelp_mid
+        kelp_change = kelp_mid - kelp_ma5 if kelp_mid else 0
         
         # Volatility adjustment (20-period STD)
-        volatility = np.std(self.ink_prices[-20:]) if len(self.ink_prices)>=20 else 2.5
+        volatility = np.std(self.ink_prices[-20:]) if len(self.ink_prices) >= 20 else 2.5
         
         fair_value = base_mid * (1 + 0.82 * kelp_change/1000) * time_factor + volatility * 0.3
         self.ink_prices.append(fair_value)
         
         # Market making logic
-        recent_vol = np.std(self.ink_prices[-10:]) if len(self.ink_prices)>=10 else 3
+        recent_vol = np.std(self.ink_prices[-10:]) if len(self.ink_prices) >= 10 else 3
         base_spread = max(3, min(6, recent_vol * 1.5))
-        position_penalty = abs(current_pos)/self.position_limit * 2
+        position_penalty = abs(current_pos)/self.LIMIT[product] * 2
         spread = base_spread * (1 + position_penalty)
         
         # Trend following spread adjustment
-        kelp_trend = np.mean(self.kelp_prices[-3:]) - np.mean(self.kelp_prices[-10:])
+        kelp_trend = np.mean(self.kelp_prices[-3:]) - np.mean(self.kelp_prices[-10:]) if len(self.kelp_prices) >= 10 else 0
         spread -= abs(kelp_trend) * 0.1
         
         bid_price = math.floor(fair_value - spread/2)
         ask_price = math.ceil(fair_value + spread/2)
         
-        # Order sizing with inventory management
-        max_buy = min(15, self.position_limit - current_pos)
-        max_sell = min(15, self.position_limit + current_pos)
+        # Order sizing with inventory management - ensure we don't exceed limits
+        max_buy = min(10, self.LIMIT[product] - current_pos)  # Reduced from 15 to 10
+        max_sell = min(10, self.LIMIT[product] + current_pos)  # Reduced from 15 to 10
         
         # Add market making orders
-        orders.append(Order(product, bid_price, max_buy))
-        orders.append(Order(product, ask_price, -max_sell))
+        if max_buy > 0:
+            orders.append(Order(product, bid_price, max_buy))
+        if max_sell > 0:
+            orders.append(Order(product, ask_price, -max_sell))
         
-        # Liquidity taking (mean reversion)
-        ma_20 = np.mean(self.ink_prices[-20:]) if len(self.ink_prices)>=20 else fair_value
-        for ask, vol in sorted(depth.sell_orders.items()):
+        # Liquidity taking (mean reversion) - with stricter limits
+        ma_20 = np.mean(self.ink_prices[-20:]) if len(self.ink_prices) >= 20 else fair_value
+        for ask, vol in sorted(order_depth.sell_orders.items()):
             if ask <= fair_value - 2 or ask <= ma_20 * 0.995:
-                volume = min(-vol, self.position_limit - current_pos)
-                orders.append(Order(product, ask, volume))
+                volume = min(-vol, self.LIMIT[product] - current_pos, 5)  # Added hard limit of 5
+                if volume > 0:
+                    orders.append(Order(product, ask, volume))
                 
-        for bid, vol in sorted(depth.buy_orders.items(), reverse=True):
+        for bid, vol in sorted(order_depth.buy_orders.items(), reverse=True):
             if bid >= fair_value + 2 or bid >= ma_20 * 1.005:
-                volume = max(-vol, -self.position_limit - current_pos)
-                orders.append(Order(product, bid, volume))
+                volume = max(-vol, -self.LIMIT[product] - current_pos, -5)  # Added hard limit of 5
+                if volume < 0:
+                    orders.append(Order(product, bid, volume))
         
         # Hard stop-loss at 2.5% deviation from 50-period MA
-        ma_50 = np.mean(self.ink_prices[-50:]) if len(self.ink_prices)>=50 else fair_value
+        ma_50 = np.mean(self.ink_prices[-50:]) if len(self.ink_prices) >= 50 else fair_value
         if current_pos > 0 and fair_value < ma_50 * 0.975:
-            orders = [Order(product, bid_price, -current_pos)]
+            # Instead of overwriting orders, add stop-loss order
+            orders.append(Order(product, bid_price, -current_pos))
         elif current_pos < 0 and fair_value > ma_50 * 1.025:
-            orders = [Order(product, ask_price, -current_pos)]
+            # Instead of overwriting orders, add stop-loss order
+            orders.append(Order(product, ask_price, -current_pos))
         
         return orders
 
     def run(self, state: TradingState):
         result = {}
+        
+        # Load previous state if available
+        if state.traderData:
+            try:
+                traderData = jsonpickle.decode(state.traderData)
+                self.kelp_prices = traderData.get("kelp_prices", [])
+                self.kelp_vwap = traderData.get("kelp_vwap", [])
+                self.ink_prices = traderData.get("ink_prices", [])
+            except:
+                pass
 
-        resin_fair_value = 10000  # Participant should calculate this value
+        # Trading parameters
+        resin_fair_value = 10000
         resin_width = 2
-        resin_position_limit = 50
-
         kelp_make_width = 3.5
         kelp_take_width = 1
-        kelp_position_limit = 50
-        kelp_timemspan = 10
-
-        squid_position_limit = 50
-        squid_make_width = 3.5
-        squid_take_width = 1
+        kelp_timespan = 10
         
-        # traderData = jsonpickle.decode(state.traderData)
-        # print(state.traderData)
-        # self.kelp_prices = traderData["kelp_prices"]
-        # self.kelp_vwap = traderData["kelp_vwap"]
-        print(state.traderData)
-
+        # Process each product
         if Product.RAINFOREST_RESIN in state.order_depths:
-            resin_position = state.position[Product.RAINFOREST_RESIN] if Product.RAINFOREST_RESIN in state.position else 0
-            resin_orders = self.resin_orders(state.order_depths[Product.RAINFOREST_RESIN], resin_fair_value, resin_width, resin_position, resin_position_limit)
+            resin_position = self.get_position(Product.RAINFOREST_RESIN, state)
+            resin_orders = self.resin_orders(
+                state.order_depths[Product.RAINFOREST_RESIN],
+                resin_fair_value,
+                resin_width,
+                resin_position,
+                self.LIMIT[Product.RAINFOREST_RESIN]
+            )
             result[Product.RAINFOREST_RESIN] = resin_orders
 
         if Product.KELP in state.order_depths:
-            kelp_position = state.position[Product.KELP] if Product.KELP in state.position else 0
-            kelp_orders = self.kelp_orders(state.order_depths[Product.KELP], kelp_timemspan, kelp_make_width, kelp_take_width, kelp_position, kelp_position_limit)
+            kelp_position = self.get_position(Product.KELP, state)
+            kelp_orders = self.kelp_orders(
+                state.order_depths[Product.KELP],
+                kelp_timespan,
+                kelp_make_width,
+                kelp_take_width,
+                kelp_position,
+                self.LIMIT[Product.KELP]
+            )
             result[Product.KELP] = kelp_orders
-        
+
         if Product.SQUID_INK in state.order_depths:
-            squid_position = state.position[Product.SQUID_INK] if Product.SQUID_INK in state.position else 0
-            squid_orders = self.squid_ink_orders(state.order_depths[Product.SQUID_INK], resin_fair_value, resin_width, squid_position, kelp_position_limit, state)
+            squid_position = self.get_position(Product.SQUID_INK, state)
+            squid_orders = self.squid_ink_orders(
+                state.order_depths[Product.SQUID_INK],
+                resin_fair_value,  # Using resin fair value as base
+                resin_width,
+                squid_position,
+                self.LIMIT[Product.SQUID_INK],
+                state
+            )
             result[Product.SQUID_INK] = squid_orders
 
-        
-        traderData = jsonpickle.encode( { "kelp_prices": self.kelp_prices, "kelp_vwap": self.kelp_vwap })
-
+        # Save state
+        traderData = jsonpickle.encode({
+            "kelp_prices": self.kelp_prices,
+            "kelp_vwap": self.kelp_vwap,
+            "ink_prices": self.ink_prices
+        })
 
         conversions = 1
-        
         return result, conversions, traderData
 
     

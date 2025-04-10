@@ -1,10 +1,11 @@
-from datamodel import OrderDepth, UserId, TradingState, Order
-from typing import List
+from datamodel import OrderDepth, UserId, TradingState, Order, Symbol, Listing, Trade, Observation, ProsperityEncoder
+from typing import List, Any, Dict, Union
 import string
 import jsonpickle
 import json # Convert to jsonpickle?
 import numpy as np
 import math
+from collections import deque
 
 from datamodel import OrderDepth, UserId, TradingState, Order
 from typing import List
@@ -117,6 +118,7 @@ class Logger:
 
 logger = Logger()
 
+JSON = Union[Dict[str, Any], List[Any], str, int, float, bool, None]
 
 class Strategy:
 	def __init__(self, symbol: str, pos_limit: int) -> None:
@@ -232,59 +234,26 @@ class KelpStrategy(TradingStrategy):
 
 class Trader:
     def __init__(self) -> None:
-	    limits = {
-		    "RAINFOREST_RESIN": 50,
-		    "KELP": 50,
-	    }
-		self.strategies = {symbol: symbol_strat(symbol, limits[symbol]) for symbol, symbol_strat in {
-			"RAINFOREST_RESIN": RainforestResinStrategy,
-			"KELP": KelpStrategy,
-		}.items()}
-	    
-	def run(self, state: TradingState):
-		conversions = 0
-		old_data = json.loads(state.traderData) if state.traderData != "" else {}
-		new_data = {}
-		orders = {}
-		for symbol, strategy in self.strategies.items():
-			if symbol in old_data:
-				strategy.load(old_data.get(symbol, None))
-			if symbol in state.order_depths:
-				orders[symbol] = strategy.run(state)
-			new_data[symbol] = strategy.save()
-		trader_data = json.dumps(new_data, separators=(",", ":"))
-		logger.flush(state, orders, conversions, trader_data)
-		return orders, conversions, trader_data
-    #     print("traderData: " + state.traderData)
-    #     print("Observations: " + str(state.observations))
-
-				# # Orders to be placed on exchange matching engine
-    #     result = {}
-    #     for product in state.order_depths:
-    #         order_depth: OrderDepth = state.order_depths[product]
-    #         orders: List[Order] = []
-    #         acceptable_price = 10  # Participant should calculate this value
-    #         print("Acceptable price : " + str(acceptable_price))
-    #         print("Buy Order depth : " + str(len(order_depth.buy_orders)) + ", Sell order depth : " + str(len(order_depth.sell_orders)))
-    
-    #         if len(order_depth.sell_orders) != 0:
-    #             best_ask, best_ask_amount = list(order_depth.sell_orders.items())[0]
-    #             if int(best_ask) < acceptable_price:
-    #                 print("BUY", str(-best_ask_amount) + "x", best_ask)
-    #                 orders.append(Order(product, best_ask, -best_ask_amount))
-    
-    #         if len(order_depth.buy_orders) != 0:
-    #             best_bid, best_bid_amount = list(order_depth.buy_orders.items())[0]
-    #             if int(best_bid) > acceptable_price:
-    #                 print("SELL", str(best_bid_amount) + "x", best_bid)
-    #                 orders.append(Order(product, best_bid, -best_bid_amount))
-            
-    #         result[product] = orders
-    
-		  #   # String value holding Trader state data required. 
-				# # It will be delivered as TradingState.traderData on next execution.
-    #     traderData = "SAMPLE" 
+        limits = {
+            "RAINFOREST_RESIN": 50,
+            "KELP": 50,
+        }
+        self.strategies = {symbol: symbol_strat(symbol, limits[symbol]) for symbol, symbol_strat in {
+            "RAINFOREST_RESIN": RainforestResinStrategy,
+            "KELP": KelpStrategy,
+        }.items()}
         
-				# # Sample conversion request. Check more details below. 
-    #     conversions = 1
-    #     return result, conversions, traderData
+    def run(self, state: TradingState):
+        conversions = 0
+        old_data = json.loads(state.traderData) if state.traderData != "" else {}
+        new_data = {}
+        orders = {}
+        for symbol, strategy in self.strategies.items():
+            if symbol in old_data:
+                strategy.load(old_data.get(symbol, None))
+            if symbol in state.order_depths:
+                orders[symbol] = strategy.run(state)
+            new_data[symbol] = strategy.save()
+        trader_data = json.dumps(new_data, separators=(",", ":"))
+        logger.flush(state, orders, conversions, trader_data)
+        return orders, conversions, trader_data
