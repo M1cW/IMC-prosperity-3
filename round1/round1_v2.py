@@ -142,11 +142,12 @@ class Trader:
 
         buy_order_volume = 0
         sell_order_volume = 0
-        # mm_ask = min([price for price in order_depth.sell_orders.keys() if abs(order_depth.sell_orders[price]) >= 20])
-        # mm_bid = max([price for price in order_depth.buy_orders.keys() if abs(order_depth.buy_orders[price]) >= 20])
         
-        baaf = min([price for price in order_depth.sell_orders.keys() if price > fair_value + 1])
-        bbbf = max([price for price in order_depth.buy_orders.keys() if price < fair_value - 1])
+        # Calculate ask and bid prices with fallback
+        aaf = [price for price in order_depth.sell_orders.keys() if price > fair_value + 1]
+        bbf = [price for price in order_depth.buy_orders.keys() if price < fair_value - 1]
+        baaf = min(aaf) if aaf else fair_value + 2
+        bbbf = max(bbf) if bbf else fair_value - 2
         
         # Take Orders
         buy_order_volume, sell_order_volume = self.take_best_orders(Product.RAINFOREST_RESIN, fair_value, 0.5, orders, order_depth, position, buy_order_volume, sell_order_volume)
@@ -178,9 +179,9 @@ class Trader:
             self.kelp_prices.append(mmmid_price)
 
             volume = -1 * order_depth.sell_orders[best_ask] + order_depth.buy_orders[best_bid]
-            vwap = (best_bid * (-1) * order_depth.sell_orders[best_ask] + best_ask * order_depth.buy_orders[best_bid]) / volume
-            self.kelp_vwap.append({"vol": volume, "vwap": vwap})
-            # self.kelp_mmmid.append(mmmid_price)
+            if volume != 0:
+                vwap = (best_bid * (-1) * order_depth.sell_orders[best_ask] + best_ask * order_depth.buy_orders[best_bid]) / volume
+                self.kelp_vwap.append({"vol": volume, "vwap": vwap})
             
             if len(self.kelp_vwap) > timespan:
                 self.kelp_vwap.pop(0)
@@ -212,6 +213,8 @@ class Trader:
         orders: List[Order] = []
         product = Product.SQUID_INK
         current_pos = self.get_position(product, state)
+        orders_placed = 0
+        MAX_ORDERS = 50
         
         # Calculate fair value with KELP correlation
         kelp_mid = 0
@@ -252,53 +255,116 @@ class Trader:
         bid_price = math.floor(fair_value - spread/2)
         ask_price = math.ceil(fair_value + spread/2)
         
+        # Prevent bid/ask overlap
+        if bid_price >= ask_price:
+            ask_price = bid_price + 1
+        
         # Order sizing with inventory management - ensure we don't exceed limits
         max_buy = min(10, self.LIMIT[product] - current_pos)  # Reduced from 15 to 10
         max_sell = min(10, self.LIMIT[product] + current_pos)  # Reduced from 15 to 10
         
         # Add market making orders
-        if max_buy > 0:
+        if orders_placed < MAX_ORDERS and max_buy > 0:
             orders.append(Order(product, bid_price, max_buy))
-        if max_sell > 0:
+            orders_placed += 1
+        if orders_placed < MAX_ORDERS and max_sell > 0:
             orders.append(Order(product, ask_price, -max_sell))
+            orders_placed += 1
         
-        # Liquidity taking (mean reversion) - with stricter limits
+        # Liquidity taking (mean reversion) - with aggregation by price level
         ma_20 = np.mean(self.ink_prices[-20:]) if len(self.ink_prices) >= 20 else fair_value
+        
+        # Aggregate sell orders
+        sell_aggregate = {}
         for ask, vol in sorted(order_depth.sell_orders.items()):
             if ask <= fair_value - 2 or ask <= ma_20 * 0.995:
-                volume = min(-vol, self.LIMIT[product] - current_pos, 5)  # Added hard limit of 5
+                volume = min(-vol, self.LIMIT[product] - current_pos, 5)
                 if volume > 0:
-                    orders.append(Order(product, ask, volume))
-                
+                    if ask in sell_aggregate:
+                        sell_aggregate[ask] += volume
+                    else:
+                        sell_aggregate[ask] = volume
+        
+        # Add aggregated sell orders
+        for ask, volume in sorted(sell_aggregate.items()):
+            if orders_placed >= MAX_ORDERS:
+                break
+            orders.append(Order(product, ask, volume))
+            orders_placed += 1
+        
+        # Aggregate buy orders
+        buy_aggregate = {}
         for bid, vol in sorted(order_depth.buy_orders.items(), reverse=True):
             if bid >= fair_value + 2 or bid >= ma_20 * 1.005:
-                volume = max(-vol, -self.LIMIT[product] - current_pos, -5)  # Added hard limit of 5
+                volume = max(-vol, -self.LIMIT[product] - current_pos, -5)
                 if volume < 0:
-                    orders.append(Order(product, bid, volume))
+                    if bid in buy_aggregate:
+                        buy_aggregate[bid] += volume
+                    else:
+                        buy_aggregate[bid] = volume
         
-        # Hard stop-loss at 2.5% deviation from 50-period MA
-        ma_50 = np.mean(self.ink_prices[-50:]) if len(self.ink_prices) >= 50 else fair_value
-        if current_pos > 0 and fair_value < ma_50 * 0.975:
-            # Instead of overwriting orders, add stop-loss order
-            orders.append(Order(product, bid_price, -current_pos))
-        elif current_pos < 0 and fair_value > ma_50 * 1.025:
-            # Instead of overwriting orders, add stop-loss order
-            orders.append(Order(product, ask_price, -current_pos))
+        # Add aggregated buy orders
+        for bid, volume in sorted(buy_aggregate.items(), reverse=True):
+            if orders_placed >= MAX_ORDERS:
+                break
+            orders.append(Order(product, bid, volume))
+            orders_placed += 1
+        
+        # Hard stop-loss at 2.5% deviation from 50-period MA - only if under order limit
+        if orders_placed < MAX_ORDERS:
+            ma_50 = np.mean(self.ink_prices[-50:]) if len(self.ink_prices) >= 50 else fair_value
+            if current_pos > 0 and fair_value < ma_50 * 0.975:
+                # Instead of overwriting orders, add stop-loss order
+                orders.append(Order(product, bid_price, -current_pos))
+                orders_placed += 1
+            elif current_pos < 0 and fair_value > ma_50 * 1.025:
+                # Instead of overwriting orders, add stop-loss order
+                orders.append(Order(product, ask_price, -current_pos))
+                orders_placed += 1
+        
+        # Defensive programming: Final safety check to ensure we never return more than MAX_ORDERS
+        if len(orders) > MAX_ORDERS:
+            orders = orders[:MAX_ORDERS]
+            print(f"Warning: Orders exceeded limit of {MAX_ORDERS}, truncated to first {MAX_ORDERS} orders")
         
         return orders
 
     def run(self, state: TradingState):
         result = {}
         
-        # Load previous state if available
+        # Load and validate previous state
         if state.traderData:
             try:
                 traderData = jsonpickle.decode(state.traderData)
-                self.kelp_prices = traderData.get("kelp_prices", [])
-                self.kelp_vwap = traderData.get("kelp_vwap", [])
-                self.ink_prices = traderData.get("ink_prices", [])
-            except:
-                pass
+                
+                # Validate and cleanse kelp_prices
+                if "kelp_prices" in traderData:
+                    self.kelp_prices = [float(x) for x in traderData["kelp_prices"] if isinstance(x, (int, float))]
+                else:
+                    self.kelp_prices = []
+                
+                # Validate and cleanse kelp_vwap
+                if "kelp_vwap" in traderData:
+                    self.kelp_vwap = [x for x in traderData["kelp_vwap"] 
+                                    if isinstance(x, dict) and 
+                                    "vol" in x and "vwap" in x and 
+                                    isinstance(x["vol"], (int, float)) and 
+                                    isinstance(x["vwap"], (int, float))]
+                else:
+                    self.kelp_vwap = []
+                
+                # Validate and cleanse ink_prices
+                if "ink_prices" in traderData:
+                    self.ink_prices = [float(x) for x in traderData["ink_prices"] if isinstance(x, (int, float))]
+                else:
+                    self.ink_prices = []
+                
+            except Exception as e:
+                print(f"Error loading trader data: {e}")
+                # Reset state on error
+                self.kelp_prices = []
+                self.kelp_vwap = []
+                self.ink_prices = []
 
         # Trading parameters
         resin_fair_value = 10000  # Participant should calculate this value
@@ -351,7 +417,7 @@ class Trader:
             )
             result[Product.SQUID_INK] = squid_orders
 
-        # Save state
+        # Save state with validated data
         traderData = jsonpickle.encode({
             "kelp_prices": self.kelp_prices,
             "kelp_vwap": self.kelp_vwap,
