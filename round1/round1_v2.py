@@ -301,44 +301,52 @@ class Trader:
                 pass
 
         # Trading parameters
-        resin_fair_value = 10000
+        resin_fair_value = 10000  # Participant should calculate this value
         resin_width = 2
+        resin_position_limit = 50
+
         kelp_make_width = 3.5
         kelp_take_width = 1
+        kelp_position_limit = 50
         kelp_timespan = 10
-        
-        # Process each product
+
+        squid_position_limit = 50
+        squid_make_width = 3.5
+        squid_take_width = 1
+
+        print(state.traderData)
+
         if Product.RAINFOREST_RESIN in state.order_depths:
-            resin_position = self.get_position(Product.RAINFOREST_RESIN, state)
+            resin_position = state.position[Product.RAINFOREST_RESIN] if Product.RAINFOREST_RESIN in state.position else 0
             resin_orders = self.resin_orders(
                 state.order_depths[Product.RAINFOREST_RESIN],
                 resin_fair_value,
                 resin_width,
                 resin_position,
-                self.LIMIT[Product.RAINFOREST_RESIN]
+                resin_position_limit
             )
             result[Product.RAINFOREST_RESIN] = resin_orders
 
         if Product.KELP in state.order_depths:
-            kelp_position = self.get_position(Product.KELP, state)
+            kelp_position = state.position[Product.KELP] if Product.KELP in state.position else 0
             kelp_orders = self.kelp_orders(
                 state.order_depths[Product.KELP],
                 kelp_timespan,
                 kelp_make_width,
                 kelp_take_width,
                 kelp_position,
-                self.LIMIT[Product.KELP]
+                kelp_position_limit
             )
             result[Product.KELP] = kelp_orders
 
         if Product.SQUID_INK in state.order_depths:
-            squid_position = self.get_position(Product.SQUID_INK, state)
+            squid_position = state.position[Product.SQUID_INK] if Product.SQUID_INK in state.position else 0
             squid_orders = self.squid_ink_orders(
                 state.order_depths[Product.SQUID_INK],
-                resin_fair_value,  # Using resin fair value as base
+                resin_fair_value,
                 resin_width,
                 squid_position,
-                self.LIMIT[Product.SQUID_INK],
+                squid_position_limit,
                 state
             )
             result[Product.SQUID_INK] = squid_orders
@@ -352,5 +360,3 @@ class Trader:
 
         conversions = 1
         return result, conversions, traderData
-
-    
