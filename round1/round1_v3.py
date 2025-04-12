@@ -8,12 +8,6 @@ class Product:
     RAINFOREST_RESIN = "RAINFOREST_RESIN"
     KELP = "KELP"
     SQUID_INK = "SQUID_INK"
-    PICNIC_BASKET_1 = "PICNIC_BASKET_1"
-    PICNIC_BASKET_2 = "PICNIC_BASKET_2"
-    CROISSANTS = "CROISSANTS"
-    JAMS = "JAMS"
-    DJEMBE = "DJEMBE"
-
 
 class Trader:
     def __init__(self):
@@ -25,12 +19,7 @@ class Trader:
         self.LIMIT = {
             Product.RAINFOREST_RESIN: 50,
             Product.KELP: 50,
-            Product.SQUID_INK: 50,
-            Product.CROISSANTS: 250,
-            Product.JAMS: 350,
-            Product.DJEMBE: 60,
-            Product.PICNIC_BASKET_1: 60,
-            Product.PICNIC_BASKET_2: 100
+            Product.SQUID_INK: 50
         }
         
         # Initialize position tracking
@@ -178,6 +167,22 @@ class Trader:
 
         if len(order_depth.sell_orders) != 0 and len(order_depth.buy_orders) != 0:    
             
+            # Calculate Order Book Skew
+            buy_vol = sum(order_depth.buy_orders.values())
+            sell_vol = -sum(order_depth.sell_orders.values())
+            total_vol = buy_vol + sell_vol
+            skew = (buy_vol - sell_vol) / total_vol if total_vol > 0 else 0
+            
+            # Calculate depth-weighted price impact
+            depth_levels = 3  # Number of price levels to consider
+            buy_prices = sorted(order_depth.buy_orders.keys(), reverse=True)[:depth_levels]
+            sell_prices = sorted(order_depth.sell_orders.keys())[:depth_levels]
+            
+            # Calculate weighted mid price
+            weighted_bid = sum(price * order_depth.buy_orders[price] for price in buy_prices) / buy_vol if buy_vol > 0 else 0
+            weighted_ask = sum(price * (-order_depth.sell_orders[price]) for price in sell_prices) / sell_vol if sell_vol > 0 else 0
+            weighted_mid = (weighted_bid + weighted_ask) / 2 if weighted_bid and weighted_ask else 0
+            
             # Calculate Fair
             best_ask = min(order_depth.sell_orders.keys())
             best_bid = max(order_depth.buy_orders.keys())
@@ -200,23 +205,54 @@ class Trader:
             if len(self.kelp_prices) > timespan:
                 self.kelp_prices.pop(0)
         
-            # fair_value = sum([x["vwap"]*x['vol'] for x in self.kelp_vwap]) / sum([x['vol'] for x in self.kelp_vwap])=
-            # fair_value = sum(self.kelp_prices) / len(self.kelp_prices)
-            fair_value = mmmid_price
+            # Calculate trend using MA(3) vs MA(10)
+            if len(self.kelp_prices) >= 10:
+                ma3 = np.mean(self.kelp_prices[-3:])
+                ma10 = np.mean(self.kelp_prices[-10:])
+                trend = ma3 - ma10  # Positive means uptrend
+                trend_strength = abs(trend) / np.std(self.kelp_prices[-10:]) if len(self.kelp_prices) >= 10 else 0
+            else:
+                trend = 0
+                trend_strength = 0
+            
+            # Combine weighted mid with skew adjustment
+            fair_value = weighted_mid if weighted_mid else mmmid_price
+            # Adjust fair value based on order book skew
+            fair_value *= (1 + skew * 0.1)  # 10% maximum adjustment based on skew
 
+            # Adjust take width based on trend and skew
+            adjusted_take_width = kelp_take_width * (1 - trend_strength * 0.5) * (1 - abs(skew) * 0.5)
+            
             # only taking best bid/ask
-            buy_order_volume, sell_order_volume = self.take_best_orders(Product.KELP, fair_value, kelp_take_width, orders, order_depth, position, buy_order_volume, sell_order_volume, True, 20)
+            buy_order_volume, sell_order_volume = self.take_best_orders(Product.KELP, fair_value, adjusted_take_width, orders, order_depth, position, buy_order_volume, sell_order_volume, True, 20)
             
             # Clear Position Orders
             buy_order_volume, sell_order_volume = self.clear_position_order(Product.KELP, fair_value, 2, orders, order_depth, position, buy_order_volume, sell_order_volume)
             
-            aaf = [price for price in order_depth.sell_orders.keys() if price > fair_value + 1]
-            bbf = [price for price in order_depth.buy_orders.keys() if price < fair_value - 1]
-            baaf = min(aaf) if len(aaf) > 0 else fair_value + 2
-            bbbf = max(bbf) if len(bbf) > 0 else fair_value - 2
+            # Adjust market making spread based on trend and skew
+            base_width = width
+            if trend > 0:  # Uptrend
+                # Widen bids, lift asks
+                bid_width = base_width * (1 + trend_strength * 0.5) * (1 + abs(skew) * 0.3)
+                ask_width = base_width * (1 - trend_strength * 0.3) * (1 - abs(skew) * 0.3)
+            else:  # Downtrend
+                # Narrow asks, slam bids
+                bid_width = base_width * (1 - trend_strength * 0.3) * (1 - abs(skew) * 0.3)
+                ask_width = base_width * (1 + trend_strength * 0.5) * (1 + abs(skew) * 0.3)
+            
+            # Additional skew-based adjustment
+            if skew > 0:  # More buy pressure
+                bid_width *= (1 + skew * 0.2)
+                ask_width *= (1 - skew * 0.2)
+            else:  # More sell pressure
+                bid_width *= (1 + skew * 0.2)
+                ask_width *= (1 - skew * 0.2)
 
-            # Market Make
-            buy_order_volume, sell_order_volume = self.market_make(Product.KELP, orders, bbbf + 1, baaf - 1, position, buy_order_volume, sell_order_volume)
+            # Market Make with trend and skew-adjusted spreads
+            buy_order_volume, sell_order_volume = self.market_make(Product.KELP, orders, 
+                math.floor(fair_value - bid_width), 
+                math.ceil(fair_value + ask_width), 
+                position, buy_order_volume, sell_order_volume)
 
         return orders
     
@@ -226,6 +262,22 @@ class Trader:
         current_pos = self.get_position(product, state)
         orders_placed = 0
         MAX_ORDERS = 50
+        
+        # Calculate Order Book Skew
+        buy_vol = sum(order_depth.buy_orders.values())
+        sell_vol = -sum(order_depth.sell_orders.values())
+        total_vol = buy_vol + sell_vol
+        skew = (buy_vol - sell_vol) / total_vol if total_vol > 0 else 0
+        
+        # Calculate depth-weighted price impact
+        depth_levels = 3  # Number of price levels to consider
+        buy_prices = sorted(order_depth.buy_orders.keys(), reverse=True)[:depth_levels]
+        sell_prices = sorted(order_depth.sell_orders.keys())[:depth_levels]
+        
+        # Calculate weighted mid price
+        weighted_bid = sum(price * order_depth.buy_orders[price] for price in buy_prices) / buy_vol if buy_vol > 0 else 0
+        weighted_ask = sum(price * (-order_depth.sell_orders[price]) for price in sell_prices) / sell_vol if sell_vol > 0 else 0
+        weighted_mid = (weighted_bid + weighted_ask) / 2 if weighted_bid and weighted_ask else 0
         
         # Calculate fair value with KELP correlation
         kelp_mid = 0
@@ -241,7 +293,7 @@ class Trader:
         
         ink_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
         ink_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else 0
-        base_mid = (ink_bid + ink_ask) / 2 if ink_bid and ink_ask else self.ink_prices[-1] if self.ink_prices else 1965
+        base_mid = weighted_mid if weighted_mid else (ink_bid + ink_ask) / 2 if ink_bid and ink_ask else self.ink_prices[-1] if self.ink_prices else 1965
         
         # Incorporate KELP momentum (0.82 correlation)
         kelp_ma5 = np.mean(self.kelp_prices[-5:]) if len(self.kelp_prices) >= 5 else kelp_mid
@@ -251,30 +303,69 @@ class Trader:
         volatility = np.std(self.ink_prices[-20:]) if len(self.ink_prices) >= 20 else 2.5
         
         fair_value = base_mid * (1 + 0.82 * kelp_change/1000) * time_factor + volatility * 0.3
+        # Adjust fair value based on order book skew
+        fair_value *= (1 + skew * 0.1)  # 10% maximum adjustment based on skew
         self.ink_prices.append(fair_value)
         
-        # Market making logic
+        # Calculate trend using MA(3) vs MA(10)
+        if len(self.ink_prices) >= 10:
+            ma3 = np.mean(self.ink_prices[-3:])
+            ma10 = np.mean(self.ink_prices[-10:])
+            trend = ma3 - ma10  # Positive means uptrend
+            trend_strength = abs(trend) / np.std(self.ink_prices[-10:]) if len(self.ink_prices) >= 10 else 0
+        else:
+            trend = 0
+            trend_strength = 0
+        
+        # Market making logic with dynamic sizing
         recent_vol = np.std(self.ink_prices[-10:]) if len(self.ink_prices) >= 10 else 3
         base_spread = max(3, min(6, recent_vol * 1.5))
-        position_penalty = abs(current_pos)/self.LIMIT[product] * 2
-        spread = base_spread * (1 + position_penalty)
+        
+        # Dynamic position penalty - more aggressive rebalancing when far from 0
+        position_penalty = abs(current_pos)/self.LIMIT[product]
+        position_scale = max(5, int((1 - position_penalty) * 20))  # Scale from 5 to 20 based on position
+        
+        # Volatility-based scaling - increase size when volatility is low
+        vol_scale = max(1, min(2, 3/recent_vol))  # Scale from 1 to 2 based on volatility
+        
+        # Combine position and volatility scaling
+        dynamic_scale = int(position_scale * vol_scale)
+        
+        # Calculate max order sizes with dynamic scaling
+        max_buy = min(dynamic_scale, self.LIMIT[product] - current_pos)
+        max_sell = min(dynamic_scale, self.LIMIT[product] + current_pos)
+        
+        # Adjust spread based on position, trend, and skew
+        if trend > 0:  # Uptrend
+            # Widen bids, lift asks
+            bid_spread = base_spread * (1 + trend_strength * 0.5) * (1 + position_penalty) * (1 + abs(skew) * 0.3)
+            ask_spread = base_spread * (1 - trend_strength * 0.3) * (1 + position_penalty) * (1 - abs(skew) * 0.3)
+        else:  # Downtrend
+            # Narrow asks, slam bids
+            bid_spread = base_spread * (1 - trend_strength * 0.3) * (1 + position_penalty) * (1 - abs(skew) * 0.3)
+            ask_spread = base_spread * (1 + trend_strength * 0.5) * (1 + position_penalty) * (1 + abs(skew) * 0.3)
+        
+        # Additional skew-based adjustment
+        if skew > 0:  # More buy pressure
+            bid_spread *= (1 + skew * 0.2)
+            ask_spread *= (1 - skew * 0.2)
+        else:  # More sell pressure
+            bid_spread *= (1 + skew * 0.2)
+            ask_spread *= (1 - skew * 0.2)
         
         # Trend following spread adjustment
         kelp_trend = np.mean(self.kelp_prices[-3:]) - np.mean(self.kelp_prices[-10:]) if len(self.kelp_prices) >= 10 else 0
-        spread -= abs(kelp_trend) * 0.1
+        bid_spread -= abs(kelp_trend) * 0.1
+        ask_spread -= abs(kelp_trend) * 0.1
         
-        bid_price = math.floor(fair_value - spread/2)
-        ask_price = math.ceil(fair_value + spread/2)
+        bid_price = math.floor(fair_value - bid_spread/2)
+        ask_price = math.ceil(fair_value + ask_spread/2)
         
         # Prevent bid/ask overlap
         if bid_price >= ask_price:
             ask_price = bid_price + 1
         
-        # Order sizing with inventory management - ensure we don't exceed limits
-        max_buy = min(10, self.LIMIT[product] - current_pos)  # Reduced from 15 to 10
-        max_sell = min(10, self.LIMIT[product] + current_pos)  # Reduced from 15 to 10
-        
-        # Add market making orders
+        # Add market making orders with dynamic sizing
         if orders_placed < MAX_ORDERS and max_buy > 0:
             orders.append(Order(product, bid_price, max_buy))
             orders_placed += 1
@@ -285,11 +376,20 @@ class Trader:
         # Liquidity taking (mean reversion) - with aggregation by price level
         ma_20 = np.mean(self.ink_prices[-20:]) if len(self.ink_prices) >= 20 else fair_value
         
-        # Aggregate sell orders
+        # Adjust take thresholds based on trend and skew
+        take_threshold = 2
+        if trend > 0:  # Uptrend
+            buy_threshold = take_threshold * (1 - trend_strength * 0.3) * (1 - abs(skew) * 0.3)  # More aggressive buying
+            sell_threshold = take_threshold * (1 + trend_strength * 0.3) * (1 + abs(skew) * 0.3)  # Less aggressive selling
+        else:  # Downtrend
+            buy_threshold = take_threshold * (1 + trend_strength * 0.3) * (1 + abs(skew) * 0.3)  # Less aggressive buying
+            sell_threshold = take_threshold * (1 - trend_strength * 0.3) * (1 - abs(skew) * 0.3)  # More aggressive selling
+        
+        # Aggregate sell orders with dynamic sizing
         sell_aggregate = {}
         for ask, vol in sorted(order_depth.sell_orders.items()):
-            if ask <= fair_value - 2 or ask <= ma_20 * 0.995:
-                volume = min(-vol, self.LIMIT[product] - current_pos, 5)
+            if ask <= fair_value - buy_threshold or ask <= ma_20 * 0.995:
+                volume = min(-vol, self.LIMIT[product] - current_pos, dynamic_scale)
                 if volume > 0:
                     if ask in sell_aggregate:
                         sell_aggregate[ask] += volume
@@ -303,11 +403,11 @@ class Trader:
             orders.append(Order(product, ask, volume))
             orders_placed += 1
         
-        # Aggregate buy orders
+        # Aggregate buy orders with dynamic sizing
         buy_aggregate = {}
         for bid, vol in sorted(order_depth.buy_orders.items(), reverse=True):
-            if bid >= fair_value + 2 or bid >= ma_20 * 1.005:
-                volume = max(-vol, -self.LIMIT[product] - current_pos, -5)
+            if bid >= fair_value + sell_threshold or bid >= ma_20 * 1.005:
+                volume = max(-vol, -self.LIMIT[product] - current_pos, -dynamic_scale)
                 if volume < 0:
                     if bid in buy_aggregate:
                         buy_aggregate[bid] += volume
@@ -339,6 +439,59 @@ class Trader:
             print(f"Warning: Orders exceeded limit of {MAX_ORDERS}, truncated to first {MAX_ORDERS} orders")
         
         return orders
+
+    def conversion_strategy(self, state: TradingState) -> int:
+        """Look for arbitrage opportunities between products and return number of conversions"""
+        conversions = 0
+        
+        # Get current positions
+        resin_pos = self.get_position(Product.RAINFOREST_RESIN, state)
+        kelp_pos = self.get_position(Product.KELP, state)
+        ink_pos = self.get_position(Product.SQUID_INK, state)
+        
+        # Calculate mid prices for each product
+        resin_mid = self.calc_mid(state.order_depths[Product.RAINFOREST_RESIN]) if Product.RAINFOREST_RESIN in state.order_depths else 0
+        kelp_mid = self.calc_mid(state.order_depths[Product.KELP]) if Product.KELP in state.order_depths else 0
+        ink_mid = self.calc_mid(state.order_depths[Product.SQUID_INK]) if Product.SQUID_INK in state.order_depths else 0
+        
+        # Conversion fee (adjust based on competition rules)
+        conversion_fee = 10
+        
+        # Check for arbitrage opportunities
+        # RAINFOREST_RESIN -> KELP conversion
+        if resin_mid > 0 and kelp_mid > 0:
+            if resin_mid - kelp_mid > conversion_fee and resin_pos > 0:
+                # Convert RAINFOREST_RESIN to KELP
+                conversions = min(resin_pos, self.LIMIT[Product.KELP] - kelp_pos)
+                print(f"Converting {conversions} RAINFOREST_RESIN to KELP (spread: {resin_mid - kelp_mid})")
+            elif kelp_mid - resin_mid > conversion_fee and kelp_pos > 0:
+                # Convert KELP to RAINFOREST_RESIN
+                conversions = -min(kelp_pos, self.LIMIT[Product.RAINFOREST_RESIN] - resin_pos)
+                print(f"Converting {abs(conversions)} KELP to RAINFOREST_RESIN (spread: {kelp_mid - resin_mid})")
+        
+        # KELP -> SQUID_INK conversion
+        if kelp_mid > 0 and ink_mid > 0:
+            if kelp_mid - ink_mid > conversion_fee and kelp_pos > 0:
+                # Convert KELP to SQUID_INK
+                conversions = -min(kelp_pos, self.LIMIT[Product.SQUID_INK] - ink_pos)
+                print(f"Converting {abs(conversions)} KELP to SQUID_INK (spread: {kelp_mid - ink_mid})")
+            elif ink_mid - kelp_mid > conversion_fee and ink_pos > 0:
+                # Convert SQUID_INK to KELP
+                conversions = min(ink_pos, self.LIMIT[Product.KELP] - kelp_pos)
+                print(f"Converting {conversions} SQUID_INK to KELP (spread: {ink_mid - kelp_mid})")
+        
+        # RAINFOREST_RESIN -> SQUID_INK conversion
+        if resin_mid > 0 and ink_mid > 0:
+            if resin_mid - ink_mid > conversion_fee and resin_pos > 0:
+                # Convert RAINFOREST_RESIN to SQUID_INK
+                conversions = min(resin_pos, self.LIMIT[Product.SQUID_INK] - ink_pos)
+                print(f"Converting {conversions} RAINFOREST_RESIN to SQUID_INK (spread: {resin_mid - ink_mid})")
+            elif ink_mid - resin_mid > conversion_fee and ink_pos > 0:
+                # Convert SQUID_INK to RAINFOREST_RESIN
+                conversions = -min(ink_pos, self.LIMIT[Product.RAINFOREST_RESIN] - resin_pos)
+                print(f"Converting {abs(conversions)} SQUID_INK to RAINFOREST_RESIN (spread: {ink_mid - resin_mid})")
+        
+        return conversions
 
     def run(self, state: TradingState):
         result = {}
@@ -435,5 +588,7 @@ class Trader:
             "ink_prices": self.ink_prices
         })
 
-        conversions = 1
+        # Calculate conversions based on arbitrage opportunities
+        conversions = self.conversion_strategy(state)
+        
         return result, conversions, traderData
