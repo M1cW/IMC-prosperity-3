@@ -4,6 +4,49 @@ import jsonpickle
 import numpy as np
 import math
 
+# Global strategy parameters
+PARAMS = {
+    # Basket arbitrage parameters
+    'basket_window_size': 20,
+    'basket_base_threshold': 1.0,
+    'basket_low_vol_threshold': 0.8,
+    'basket_high_vol_threshold': 1.5,
+    'basket_vol_factor_low': 0.8,
+    'basket_vol_factor_high': 1.2,
+    
+    # Resin parameters
+    'resin_fair_value': 10000,
+    'resin_width': 2,
+    'resin_position_limit': 50,
+    
+    # Kelp parameters
+    'kelp_make_width': 3.5,
+    'kelp_take_width': 1,
+    'kelp_position_limit': 50,
+    'kelp_timespan': 10,
+    'kelp_min_vol': 15,
+    
+    # Squid ink parameters
+    'squid_position_limit': 50,
+    'squid_make_width': 3.5,
+    'squid_take_width': 1,
+    'squid_max_orders': 50,
+    'squid_base_spread_min': 3,
+    'squid_base_spread_max': 6,
+    'squid_volatility_factor': 1.5,
+    'squid_position_penalty': 2,
+    'squid_trend_factor': 0.1,
+    'squid_stop_loss_deviation': 0.025,
+    'squid_kelp_correlation': 0.82,
+    'squid_time_factor_boost': 1.003,
+    'squid_time_factor_reduce': 0.997,
+    'squid_boost_hours': (14, 18),
+    
+    # General parameters
+    'default_position_limit': 50,
+    'min_volume_threshold': 10
+}
+
 class Product:
     RAINFOREST_RESIN = "RAINFOREST_RESIN"
     KELP = "KELP"
@@ -181,26 +224,31 @@ class Trader:
         fair = round(fair_value)
         fair_for_bid = math.floor(fair_value)
         fair_for_ask = math.ceil(fair_value)
-        # fair_for_ask = fair_for_bid = fair
 
         buy_quantity = self.LIMIT[product] - (position + buy_order_volume)
         sell_quantity = self.LIMIT[product] + (position - sell_order_volume)
 
         if position_after_take > 0:
-            if fair_for_ask in order_depth.buy_orders.keys():
-                clear_quantity = min(order_depth.buy_orders[fair_for_ask], position_after_take)
-                # clear_quantity = position_after_take
-                sent_quantity = min(sell_quantity, clear_quantity)
-                orders.append(Order(product, fair_for_ask, -abs(sent_quantity)))
-                sell_order_volume += abs(sent_quantity)
+            # Aggregate all buy orders above fair_value + width
+            remaining_to_sell = position_after_take
+            for price, volume in sorted(order_depth.buy_orders.items(), reverse=True):
+                if price >= fair_value + width and remaining_to_sell > 0:
+                    clear_quantity = min(volume, remaining_to_sell, sell_quantity)
+                    if clear_quantity > 0:
+                        orders.append(Order(product, price, -clear_quantity))
+                        sell_order_volume += clear_quantity
+                        remaining_to_sell -= clear_quantity
 
         if position_after_take < 0:
-            if fair_for_bid in order_depth.sell_orders.keys():
-                clear_quantity = min(abs(order_depth.sell_orders[fair_for_bid]), abs(position_after_take))
-                # clear_quantity = abs(position_after_take)
-                sent_quantity = min(buy_quantity, clear_quantity)
-                orders.append(Order(product, fair_for_bid, abs(sent_quantity)))
-                buy_order_volume += abs(sent_quantity)
+            # Aggregate all sell orders below fair_value - width
+            remaining_to_buy = abs(position_after_take)
+            for price, volume in sorted(order_depth.sell_orders.items()):
+                if price <= fair_value - width and remaining_to_buy > 0:
+                    clear_quantity = min(abs(volume), remaining_to_buy, buy_quantity)
+                    if clear_quantity > 0:
+                        orders.append(Order(product, price, clear_quantity))
+                        buy_order_volume += clear_quantity
+                        remaining_to_buy -= clear_quantity
     
         return buy_order_volume, sell_order_volume
 
@@ -417,8 +465,6 @@ class Trader:
     def basket_arbitrage(self, state: TradingState) -> dict:
         """Execute basket arbitrage strategy between baskets and their components"""
         result = {}
-        window_size = 20
-        z_threshold = 1.0
         
         # Initialize price history if not exists
         if not hasattr(self, 'basket_spreads'):
@@ -440,90 +486,155 @@ class Trader:
             if basket_mid == 0:
                 continue
                 
-            # Calculate synthetic price
+            # Calculate synthetic price using VWAP when available
             synthetic_price = 0
+            valid_components = True
+            
             for component, quantity in components:
+                # Skip if component is missing from order_depths
                 if component not in state.order_depths:
+                    valid_components = False
                     break
-                component_mid = self.calc_mid(state.order_depths[component])
-                if component_mid == 0:
+                    
+                # Skip if no orders in either side of the book
+                if not state.order_depths[component].buy_orders or not state.order_depths[component].sell_orders:
+                    valid_components = False
                     break
-                synthetic_price += component_mid * quantity
-            else:  # Only execute if all components have valid prices
-                # Calculate spread
-                spread = basket_mid - synthetic_price
-                self.basket_spreads[basket].append(spread)
+                    
+                # Try to calculate VWAP for the component
+                component_vwap = 0
+                total_volume = 0
                 
-                # Maintain rolling window
-                if len(self.basket_spreads[basket]) > window_size:
-                    self.basket_spreads[basket].pop(0)
+                # Calculate VWAP from order book
+                for price, vol in state.order_depths[component].buy_orders.items():
+                    component_vwap += price * vol
+                    total_volume += vol
+                for price, vol in state.order_depths[component].sell_orders.items():
+                    component_vwap += price * abs(vol)
+                    total_volume += abs(vol)
                 
-                # Calculate z-score if we have enough data
-                if len(self.basket_spreads[basket]) >= window_size:
-                    spread_mean = np.mean(self.basket_spreads[basket])
-                    spread_std = np.std(self.basket_spreads[basket])
-                    if spread_std > 0:  # Avoid division by zero
-                        z_score = (spread - spread_mean) / spread_std
-                        
-                        # Execute arbitrage based on z-score
-                        basket_position = self.get_position(basket, state)
-                        basket_orders = []
-                        
-                        if z_score > z_threshold and basket_position < self.LIMIT[basket]:
-                            # Sell basket, buy components
-                            # First check if we have enough liquidity
-                            if state.order_depths[basket].buy_orders:
-                                best_bid = max(state.order_depths[basket].buy_orders.keys())
-                                basket_volume = min(
-                                    state.order_depths[basket].buy_orders[best_bid],
-                                    self.LIMIT[basket] - basket_position
-                                )
-                                if basket_volume > 0:
-                                    basket_orders.append(Order(basket, best_bid, -basket_volume))
-                                    
-                                    # Buy components
-                                    for component, quantity in components:
-                                        if component not in result:
-                                            result[component] = []
-                                        component_position = self.get_position(component, state)
-                                        if state.order_depths[component].sell_orders:
-                                            best_ask = min(state.order_depths[component].sell_orders.keys())
-                                            component_volume = min(
-                                                -state.order_depths[component].sell_orders[best_ask],
-                                                self.LIMIT[component] - component_position,
-                                                basket_volume * quantity
-                                            )
-                                            if component_volume > 0:
-                                                result[component].append(Order(component, best_ask, component_volume))
-                        
-                        elif z_score < -z_threshold and basket_position > -self.LIMIT[basket]:
-                            # Buy basket, sell components
-                            if state.order_depths[basket].sell_orders:
-                                best_ask = min(state.order_depths[basket].sell_orders.keys())
-                                basket_volume = min(
-                                    -state.order_depths[basket].sell_orders[best_ask],
-                                    self.LIMIT[basket] + basket_position
-                                )
-                                if basket_volume > 0:
-                                    basket_orders.append(Order(basket, best_ask, basket_volume))
-                                    
-                                    # Sell components
-                                    for component, quantity in components:
-                                        if component not in result:
-                                            result[component] = []
-                                        component_position = self.get_position(component, state)
-                                        if state.order_depths[component].buy_orders:
-                                            best_bid = max(state.order_depths[component].buy_orders.keys())
-                                            component_volume = min(
-                                                state.order_depths[component].buy_orders[best_bid],
-                                                self.LIMIT[component] + component_position,
-                                                basket_volume * quantity
-                                            )
-                                            if component_volume > 0:
-                                                result[component].append(Order(component, best_bid, -component_volume))
-                        
-                        if basket_orders:
-                            result[basket] = basket_orders
+                if total_volume > 0:
+                    component_vwap = component_vwap / total_volume
+                else:
+                    # Fall back to midpoint if no volume
+                    component_vwap = self.calc_mid(state.order_depths[component])
+                
+                if component_vwap == 0:
+                    valid_components = False
+                    break
+                    
+                synthetic_price += component_vwap * quantity
+            
+            # Skip this basket if any component was invalid
+            if not valid_components:
+                continue
+                
+            # Calculate spread
+            spread = basket_mid - synthetic_price
+            self.basket_spreads[basket].append(spread)
+            
+            # Maintain rolling window
+            if len(self.basket_spreads[basket]) > PARAMS['basket_window_size']:
+                self.basket_spreads[basket].pop(0)
+            
+            # Calculate z-score if we have enough data
+            if len(self.basket_spreads[basket]) >= PARAMS['basket_window_size']:
+                spread_mean = np.mean(self.basket_spreads[basket])
+                spread_std = np.std(self.basket_spreads[basket])
+                if spread_std > 0:  # Avoid division by zero
+                    z_score = (spread - spread_mean) / spread_std
+                    
+                    # Calculate adaptive threshold based on volatility
+                    recent_volatility = np.std(self.basket_spreads[basket][-20:])
+                    volatility_factor = recent_volatility / np.mean([np.std(self.basket_spreads[basket][-20:]) for basket in self.basket_spreads.keys()])
+                    
+                    # Adjust threshold based on volatility
+                    if volatility_factor < PARAMS['basket_vol_factor_low']:
+                        z_threshold = PARAMS['basket_low_vol_threshold']
+                    elif volatility_factor > PARAMS['basket_vol_factor_high']:
+                        z_threshold = PARAMS['basket_high_vol_threshold']
+                    else:
+                        z_threshold = PARAMS['basket_base_threshold']
+                    
+                    # Execute arbitrage based on z-score
+                    basket_position = self.get_position(basket, state)
+                    basket_orders = []
+                    
+                    if z_score > z_threshold and basket_position < self.LIMIT[basket]:
+                        # Sell basket, buy components
+                        # First check if we have enough liquidity
+                        if state.order_depths[basket].buy_orders:
+                            best_bid = max(state.order_depths[basket].buy_orders.keys())
+                            basket_volume = min(
+                                state.order_depths[basket].buy_orders[best_bid],
+                                self.LIMIT[basket] - basket_position
+                            )
+                            
+                            # Calculate maximum possible basket volume based on component positions
+                            max_basket_volume = float('inf')
+                            for component, quantity in components:
+                                component_position = self.get_position(component, state)
+                                component_available = (self.LIMIT[component] - component_position) // quantity
+                                max_basket_volume = min(max_basket_volume, component_available)
+                            
+                            basket_volume = min(basket_volume, max_basket_volume)
+                            
+                            if basket_volume > 0:
+                                basket_orders.append(Order(basket, best_bid, -basket_volume))
+                                
+                                # Buy components
+                                for component, quantity in components:
+                                    if component not in result:
+                                        result[component] = []
+                                    component_position = self.get_position(component, state)
+                                    if state.order_depths[component].sell_orders:
+                                        best_ask = min(state.order_depths[component].sell_orders.keys())
+                                        component_volume = min(
+                                            -state.order_depths[component].sell_orders[best_ask],
+                                            self.LIMIT[component] - component_position,
+                                            basket_volume * quantity
+                                        )
+                                        if component_volume > 0:
+                                            result[component].append(Order(component, best_ask, component_volume))
+                    
+                    elif z_score < -z_threshold and basket_position > -self.LIMIT[basket]:
+                        # Buy basket, sell components
+                        if state.order_depths[basket].sell_orders:
+                            best_ask = min(state.order_depths[basket].sell_orders.keys())
+                            basket_volume = min(
+                                -state.order_depths[basket].sell_orders[best_ask],
+                                self.LIMIT[basket] + basket_position
+                            )
+                            
+                            # Calculate maximum possible basket volume based on component positions
+                            max_basket_volume = float('inf')
+                            for component, quantity in components:
+                                component_position = self.get_position(component, state)
+                                component_available = (self.LIMIT[component] + component_position) // quantity
+                                max_basket_volume = min(max_basket_volume, component_available)
+                            
+                            basket_volume = min(basket_volume, max_basket_volume)
+                            
+                            if basket_volume > 0:
+                                basket_orders.append(Order(basket, best_ask, basket_volume))
+                                
+                                # Sell components
+                                for component, quantity in components:
+                                    if component not in result:
+                                        result[component] = []
+                                    component_position = self.get_position(component, state)
+                                    if state.order_depths[component].buy_orders:
+                                        best_bid = max(state.order_depths[component].buy_orders.keys())
+                                        component_volume = min(
+                                            state.order_depths[component].buy_orders[best_bid],
+                                            self.LIMIT[component] + component_position,
+                                            basket_volume * quantity
+                                        )
+                                        if component_volume > 0:
+                                            result[component].append(Order(component, best_bid, -component_volume))
+                    
+                    if basket_orders:
+                        result[basket] = basket_orders
         
         return result
 
@@ -580,30 +691,14 @@ class Trader:
                     Product.PICNIC_BASKET_2: []
                 }
 
-        # Trading parameters
-        resin_fair_value = 10000  # Participant should calculate this value
-        resin_width = 2
-        resin_position_limit = 50
-
-        kelp_make_width = 3.5
-        kelp_take_width = 1
-        kelp_position_limit = 50
-        kelp_timespan = 10
-
-        squid_position_limit = 50
-        squid_make_width = 3.5
-        squid_take_width = 1
-
-        print(state.traderData)
-
         if Product.RAINFOREST_RESIN in state.order_depths:
             resin_position = state.position[Product.RAINFOREST_RESIN] if Product.RAINFOREST_RESIN in state.position else 0
             resin_orders = self.resin_orders(
                 state.order_depths[Product.RAINFOREST_RESIN],
-                resin_fair_value,
-                resin_width,
+                PARAMS['resin_fair_value'],
+                PARAMS['resin_width'],
                 resin_position,
-                resin_position_limit
+                PARAMS['resin_position_limit']
             )
             result[Product.RAINFOREST_RESIN] = resin_orders
 
@@ -611,11 +706,11 @@ class Trader:
             kelp_position = state.position[Product.KELP] if Product.KELP in state.position else 0
             kelp_orders = self.kelp_orders(
                 state.order_depths[Product.KELP],
-                kelp_timespan,
-                kelp_make_width,
-                kelp_take_width,
+                PARAMS['kelp_timespan'],
+                PARAMS['kelp_make_width'],
+                PARAMS['kelp_take_width'],
                 kelp_position,
-                kelp_position_limit
+                PARAMS['kelp_position_limit']
             )
             result[Product.KELP] = kelp_orders
 
@@ -623,10 +718,10 @@ class Trader:
             squid_position = state.position[Product.SQUID_INK] if Product.SQUID_INK in state.position else 0
             squid_orders = self.squid_ink_orders(
                 state.order_depths[Product.SQUID_INK],
-                resin_fair_value,
-                resin_width,
+                PARAMS['resin_fair_value'],
+                PARAMS['resin_width'],
                 squid_position,
-                squid_position_limit,
+                PARAMS['squid_position_limit'],
                 state
             )
             result[Product.SQUID_INK] = squid_orders

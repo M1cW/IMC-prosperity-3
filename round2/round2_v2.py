@@ -14,6 +14,94 @@ class Product:
     JAMS = "JAMS"
     DJEMBE = "DJEMBE"
 
+class AdaptiveMarketMaker:
+    def __init__(self, initial_edge: float = 2.0, min_edge: float = 1.0, max_edge: float = 5.0,
+                 execution_threshold: float = 0.3, adjustment_window: int = 20,
+                 adjustment_step: float = 0.5):
+        """
+        Initialize the adaptive market maker.
+        
+        Args:
+            initial_edge: Initial edge from fair price
+            min_edge: Minimum allowed edge
+            max_edge: Maximum allowed edge
+            execution_threshold: Minimum execution rate to maintain current edge
+            adjustment_window: Number of ticks to consider for execution rate
+            adjustment_step: How much to adjust edge by
+        """
+        self.initial_edge = initial_edge
+        self.current_edge = initial_edge
+        self.min_edge = min_edge
+        self.max_edge = max_edge
+        self.execution_threshold = execution_threshold
+        self.adjustment_window = adjustment_window
+        self.adjustment_step = adjustment_step
+        
+        # Track fill history
+        self.fill_history = []
+        self.last_adjustment_tick = 0
+        
+    def place_quotes(self, fair_price: float) -> tuple[float, float]:
+        """
+        Generate bid and ask quotes based on current edge.
+        
+        Args:
+            fair_price: Current fair price
+            
+        Returns:
+            tuple: (bid_price, ask_price)
+        """
+        bid_price = math.floor(fair_price - self.current_edge)
+        ask_price = math.ceil(fair_price + self.current_edge)
+        return bid_price, ask_price
+        
+    def record_fill(self, successful: bool, current_tick: int) -> None:
+        """
+        Record whether a quote was filled.
+        
+        Args:
+            successful: Whether the quote was filled
+            current_tick: Current timestamp/tick
+        """
+        self.fill_history.append((current_tick, successful))
+        
+        # Maintain window size
+        while len(self.fill_history) > self.adjustment_window:
+            self.fill_history.pop(0)
+            
+        # Adjust edge if needed
+        if current_tick - self.last_adjustment_tick >= self.adjustment_window:
+            self.adjust_edge(current_tick)
+            
+    def adjust_edge(self, current_tick: int) -> None:
+        """
+        Adjust quoting edge based on recent execution rate.
+        
+        Args:
+            current_tick: Current timestamp/tick
+        """
+        if not self.fill_history:
+            return
+            
+        # Calculate execution rate
+        successful_fills = sum(1 for _, success in self.fill_history if success)
+        execution_rate = successful_fills / len(self.fill_history)
+        
+        # Adjust edge based on execution rate
+        if execution_rate < self.execution_threshold:
+            # Reduce edge if execution rate is too low
+            self.current_edge = max(self.min_edge, self.current_edge - self.adjustment_step)
+        elif execution_rate > 0.8:  # High execution rate
+            # Increase edge if execution rate is high
+            self.current_edge = min(self.max_edge, self.current_edge + self.adjustment_step)
+            
+        self.last_adjustment_tick = current_tick
+        
+    def reset(self) -> None:
+        """Reset the market maker to initial state."""
+        self.current_edge = self.initial_edge
+        self.fill_history = []
+        self.last_adjustment_tick = 0
 
 class Trader:
     def __init__(self):
